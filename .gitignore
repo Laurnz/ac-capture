@@ -1,1 +1,4 @@
 build/
+accapture.egg-info/
+
+capture_wrapper.c
