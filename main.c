@@ -208,6 +208,7 @@ int main(void)
     printf("Waiting for a valid texture...\n");
     while (shared->items_count <= 0) {
         Sleep(100);
+        shared->alive_counter = 60;
     }
 
     // Pick the first available texture (with nonzero handle and not flagged as unavailable).
