@@ -14,7 +14,7 @@ extensions = [
 setup(
     name="accapture",
     ext_modules=cythonize(extensions),
-    version="0.2",
+    version="1.0",
     description="A Python wrapper for capturing frames from Assetto Corsa textures",
     author="Laurenz Fussenegger",
     author_email="fussenegger@student.tugraz.at",
