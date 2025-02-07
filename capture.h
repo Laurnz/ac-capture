@@ -13,13 +13,13 @@ typedef struct
     unsigned char *data; // pointer to pixel data in BGRA format
     unsigned int width;
     unsigned int height;
-    unsigned int rowPitch;
 } Frame;
 
 DLLEXPORT int initialize_capture(); // call once to setup D3D11 device etc.
 DLLEXPORT void shutdown_capture();
 
-DLLEXPORT int grab_frame(Frame *outFrame); // Has to be called often to reset the alive counter
+DLLEXPORT int grab_current_frame(Frame *outFrame);
+DLLEXPORT int wait_new_frame(Frame *outFrame);
 
 #ifdef __cplusplus
 }

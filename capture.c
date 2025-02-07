@@ -40,14 +40,20 @@ typedef struct
 
 static ID3D11Device *device = NULL;
 static ID3D11DeviceContext *context = NULL;
-static ID3D11Texture2D *sharedTex = NULL;
 static ID3D11Texture2D *stagingTex = NULL;
 static HANDLE hMap = NULL;
 static accsp_data *accspHandle = NULL;
 static accsp_source *accspSource = NULL;
+static uint32_t lastHandle = NULL;
 
 DLLEXPORT int initialize_capture(void)
 {
+    if (device || context || accspHandle || accspSource)
+    {
+        printf("Capture already initialized.\n");
+        return -1;
+    }
+
     HRESULT hr;
 
     // Create a basic D3D11 device.
@@ -64,7 +70,7 @@ DLLEXPORT int initialize_capture(void)
     if (FAILED(hr))
     {
         printf("Failed to create D3D11 device (hr=0x%08X).\n", hr);
-        return -1;
+        return -2;
     }
 
     // Open the shared memory mapping created by the Assetto Corsa shader pack.
@@ -72,7 +78,7 @@ DLLEXPORT int initialize_capture(void)
     if (!hMap)
     {
         printf("Failed to open shared memory mapping.\n");
-        return -1;
+        return -3;
     }
 
     accspHandle = (accsp_data*) MapViewOfFile(hMap, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, sizeof(accsp_data));
@@ -80,7 +86,7 @@ DLLEXPORT int initialize_capture(void)
     {
         printf("Failed to map shared memory.\n");
         CloseHandle(hMap);
-        return -1;
+        return -4;
     }
 
     accspHandle->alive_counter = 60; // Signal CSP that the interface is alive
@@ -97,33 +103,59 @@ DLLEXPORT int initialize_capture(void)
     for (int i = 0; i < accspHandle->items_count; ++i)
     {
         char isValid = accspHandle->items[i].handle != 0 && !(accspHandle->items[i].flags & FLAG_TEXTURE_UNAVAILABLE);
-        printf("Source %d '%s' is valid: '%d'", i, accspHandle->items[i].name, isValid);
+        printf("Source %d '%s' is %s\n", i, accspHandle->items[i].name, isValid ? "valid" : "invalid");
     }
 
     // Pick the first available texture (with nonzero handle and not flagged as unavailable).
-    accsp_source *chosen = NULL;
     for (int i = 0; i < accspHandle->items_count; ++i)
     {
         if (accspHandle->items[i].handle != 0 && !(accspHandle->items[i].flags & FLAG_TEXTURE_UNAVAILABLE))
         {
-            chosen = &accspHandle->items[i];
+            accspSource = &accspHandle->items[i];
             break;
         }
     }
-    if (!chosen) {
+    if (!accspSource) {
         printf("No valid texture found in shared memory.\n");
         UnmapViewOfFile(accspHandle);
         CloseHandle(hMap);
-        return -1;
+        return -5;
     }
     printf("Using texture '%s' (handle=0x%08X, size=%dx%d).\n",
-           chosen->name, chosen->handle, chosen->width, chosen->height);
+           accspSource->name, accspSource->handle, accspSource->width, accspSource->height);
+
+    accspSource->needs_data = 3; // Signal CSP that we want to receive images from this source
+
+    return 0;
+}
+
+DLLEXPORT int wait_new_frame(Frame *outFrame)
+{
+    if (!accspSource)
+        return -1;
+
+    while (accspSource->handle <= 0 && accspSource->handle == lastHandle)
+        Sleep(5);
+
+    return grab_current_frame(outFrame);
+}
+
+DLLEXPORT int grab_current_frame(Frame *outFrame)
+{
+    if (!device || !context || !accspHandle || !accspSource)
+        return -1;
+    
+    HRESULT hr;
+
+    accspHandle->alive_counter = 60; // Still alive, not sure if needed
+    accspSource->needs_data = 3; // Signal CSP that we want get a new image
+    lastHandle = accspSource->handle;
 
     // Open the shared D3D11 texture resource.
     // (The shader pack sends the texture handle as a uint32_t; cast it to HANDLE.)
     ID3D11Texture2D *sharedTex = NULL;
     hr = device->lpVtbl->OpenSharedResource(device,
-            (HANDLE)(uintptr_t)chosen->handle,
+            (HANDLE)(uintptr_t)accspSource->handle,
             &IID_ID3D11Texture2D,
             (void**)&sharedTex);
     if (FAILED(hr))
@@ -131,52 +163,42 @@ DLLEXPORT int initialize_capture(void)
         printf("Failed to open shared texture resource (hr=0x%08X).\n", hr);
         UnmapViewOfFile(accspHandle);
         CloseHandle(hMap);
-        return -1;
+        return -6;
     }
 
-    // Get the description of the shared texture.
-    D3D11_TEXTURE2D_DESC texDesc;
-    sharedTex->lpVtbl->GetDesc(sharedTex, &texDesc);
-    printf("Shared texture format=0x%08X, width=%u, height=%u\n",
-           texDesc.Format, texDesc.Width, texDesc.Height);
-
-    // Create a staging texture with CPU read access.
-    D3D11_TEXTURE2D_DESC stagingDesc = texDesc;
-    stagingDesc.Usage = D3D11_USAGE_STAGING;
-    stagingDesc.BindFlags = 0;
-    stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-    stagingDesc.MiscFlags = 0;
-
-    ID3D11Texture2D *stagingTex = NULL;
-    hr = device->lpVtbl->CreateTexture2D(device, &stagingDesc, NULL, &stagingTex);
-    if (FAILED(hr))
+    // Create staging texture for CPU access
+    if (!stagingTex)
     {
-        printf("Failed to create staging texture (hr=0x%08X).\n", hr);
-        sharedTex->lpVtbl->Release(sharedTex);
-        UnmapViewOfFile(accspHandle);
-        CloseHandle(hMap);
-        return -1;
-    }
+        // Get the description of the shared texture.
+        D3D11_TEXTURE2D_DESC texDesc;
+        sharedTex->lpVtbl->GetDesc(sharedTex, &texDesc);
+        printf("Shared texture format=0x%08X, width=%u, height=%u\n",
+            texDesc.Format, texDesc.Width, texDesc.Height);
 
-    accspSource->needs_data = 3; // Signal CSP that we want to receive images from this source
+        // Create a staging texture with CPU read access.
+        D3D11_TEXTURE2D_DESC stagingDesc = texDesc;
+        stagingDesc.Usage = D3D11_USAGE_STAGING;
+        stagingDesc.BindFlags = 0;
+        stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        stagingDesc.MiscFlags = 0;
 
-    return 0;
-}
-
-DLLEXPORT int grab_frame(Frame *outFrame)
-{
-    if (!device || !context || !sharedTex || !stagingTex || !accspHandle || !accspSource)
-        return -1;
+        hr = device->lpVtbl->CreateTexture2D(device, &stagingDesc, NULL, &stagingTex);
+        if (FAILED(hr))
+        {
+            printf("Failed to create staging texture (hr=0x%08X).\n", hr);
+            sharedTex->lpVtbl->Release(sharedTex);
+            UnmapViewOfFile(accspHandle);
+            CloseHandle(hMap);
+            return -1;
+        }
+    }    
     
-    // Still alive
-    accspHandle->alive_counter = 60;
-
     // Copy the shared texture to the staging texture.
     context->lpVtbl->CopyResource(context, (ID3D11Resource*)stagingTex, (ID3D11Resource*)sharedTex);
 
-    // Map the staging texture for reading.
+    // Map the texture for reading.
     D3D11_MAPPED_SUBRESOURCE mapped;
-    HRESULT hr = context->lpVtbl->Map(context, (ID3D11Resource*)stagingTex, 0, D3D11_MAP_READ, 0, &mapped);
+    hr = context->lpVtbl->Map(context, (ID3D11Resource*)stagingTex, 0, D3D11_MAP_READ, 0, &mapped);
     if (FAILED(hr))
         return -2;
 
@@ -193,15 +215,23 @@ DLLEXPORT int grab_frame(Frame *outFrame)
     }
 
     // Copy the data row by row (if the rowPitch != width * bytesPerPixel).
-    outFrame->rowPitch = mapped.RowPitch;
-    for (unsigned int y = 0; y < height; y++) {
-        memcpy(buffer + y * width * bytesPerPixel,
-               (unsigned char*)mapped.pData + y * mapped.RowPitch,
-               width * bytesPerPixel);
+    if (mapped.RowPitch == width * 4)
+    {
+        memcpy(buffer, mapped.pData, size);
     }
+    else
+    {
+        for (unsigned int y = 0; y < height; y++)
+        {
+            memcpy(buffer + y * width * bytesPerPixel,
+                (unsigned char*)mapped.pData + y * mapped.RowPitch,
+                width * bytesPerPixel);
+        }
+    }    
 
     // Unmap the texture.
     context->lpVtbl->Unmap(context, (ID3D11Resource*)stagingTex, 0);
+    sharedTex->lpVtbl->Release(sharedTex);
 
     // Return the buffer in the outFrame.
     outFrame->data = buffer;
@@ -216,10 +246,10 @@ DLLEXPORT void shutdown_capture(void)
         stagingTex->lpVtbl->Release(stagingTex);
         stagingTex = NULL;
     }
-    if (sharedTex)
+    if (accspSource)
     {
-        sharedTex->lpVtbl->Release(sharedTex);
-        sharedTex = NULL;
+        accspSource->needs_data = 0;
+        accspSource = NULL;
     }
     if (context)
     {
@@ -231,7 +261,14 @@ DLLEXPORT void shutdown_capture(void)
         device->lpVtbl->Release(device);
         device = NULL;
     }
-        
-    UnmapViewOfFile(accspHandle);
-    CloseHandle(hMap);
+    if (accspHandle)
+    {
+        UnmapViewOfFile(accspHandle);
+        accspHandle = NULL;
+    }
+    if (hMap)
+    {
+        CloseHandle(hMap);
+        hMap = NULL;
+    }
 }
