@@ -4,7 +4,7 @@ import os
 
 extensions = [
     Extension(
-        "capture_wrapper",
+        "accapture",
         ["capture_wrapper.pyx", "capture.c"],
         include_dirs=[os.getcwd()],
         libraries=["d3d11"]

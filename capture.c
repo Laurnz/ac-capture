@@ -7,6 +7,7 @@
 #include <string.h>
 #include "capture.h"
 
+// Definitions taken from the Assetto Corsa custom shader pack OBS plugin
 #define MAX_TEXTURES 63
 #define NAME_LENGTH 48
 #define DESCRIPTION_LENGTH 256
@@ -40,6 +41,7 @@ typedef struct
 
 static ID3D11Device *device = NULL;
 static ID3D11DeviceContext *context = NULL;
+static ID3D11Texture2D *sharedTex = NULL;
 static ID3D11Texture2D *stagingTex = NULL;
 static HANDLE hMap = NULL;
 static accsp_data *accspHandle = NULL;
@@ -123,8 +125,8 @@ DLLEXPORT int initialize_capture(void)
     }
     printf("Using texture '%s' (handle=0x%08X, size=%dx%d).\n",
            accspSource->name, accspSource->handle, accspSource->width, accspSource->height);
-
-    accspSource->needs_data = 3; // Signal CSP that we want to receive images from this source
+    
+    accspSource->needs_data = 3; // Signal CSP that it should start filling the texture
 
     return 0;
 }
@@ -134,8 +136,13 @@ DLLEXPORT int wait_new_frame(Frame *outFrame)
     if (!accspSource)
         return -1;
 
-    while (accspSource->handle <= 0 && accspSource->handle == lastHandle)
-        Sleep(5);
+    accspSource->needs_data = 3; // Signal CSP that we want to get a new image
+
+    // Wait until the texture is ready.
+    while (accspSource->needs_data == 3)
+    {
+        Sleep(2);
+    }
 
     return grab_current_frame(outFrame);
 }
@@ -148,22 +155,26 @@ DLLEXPORT int grab_current_frame(Frame *outFrame)
     HRESULT hr;
 
     accspHandle->alive_counter = 60; // Still alive, not sure if needed
-    accspSource->needs_data = 3; // Signal CSP that we want get a new image
-    lastHandle = accspSource->handle;
+    accspSource->needs_data = 3; // Signal CSP that we want to get a new image
 
     // Open the shared D3D11 texture resource.
-    // (The shader pack sends the texture handle as a uint32_t; cast it to HANDLE.)
-    ID3D11Texture2D *sharedTex = NULL;
-    hr = device->lpVtbl->OpenSharedResource(device,
-            (HANDLE)(uintptr_t)accspSource->handle,
-            &IID_ID3D11Texture2D,
-            (void**)&sharedTex);
-    if (FAILED(hr))
+    if (accspSource->handle != lastHandle)
     {
-        printf("Failed to open shared texture resource (hr=0x%08X).\n", hr);
-        UnmapViewOfFile(accspHandle);
-        CloseHandle(hMap);
-        return -6;
+        lastHandle = accspSource->handle;
+        if (sharedTex)
+            sharedTex->lpVtbl->Release(sharedTex);
+
+        hr = device->lpVtbl->OpenSharedResource(device,
+                (HANDLE)(uintptr_t)lastHandle,
+                &IID_ID3D11Texture2D,
+                (void**)&sharedTex);
+        if (FAILED(hr))
+        {
+            printf("Failed to open shared texture resource (hr=0x%08X).\n", hr);
+            UnmapViewOfFile(accspHandle);
+            CloseHandle(hMap);
+            return -6;
+        }
     }
 
     // Create staging texture for CPU access
@@ -209,7 +220,8 @@ DLLEXPORT int grab_current_frame(Frame *outFrame)
     unsigned int bytesPerPixel = 4;
     unsigned int size = width * height * bytesPerPixel;
     unsigned char *buffer = (unsigned char*)malloc(size);
-    if (!buffer) {
+    if (!buffer)
+    {
         context->lpVtbl->Unmap(context, (ID3D11Resource*)stagingTex, 0);
         return -3;
     }
@@ -231,7 +243,6 @@ DLLEXPORT int grab_current_frame(Frame *outFrame)
 
     // Unmap the texture.
     context->lpVtbl->Unmap(context, (ID3D11Resource*)stagingTex, 0);
-    sharedTex->lpVtbl->Release(sharedTex);
 
     // Return the buffer in the outFrame.
     outFrame->data = buffer;
@@ -241,6 +252,11 @@ DLLEXPORT int grab_current_frame(Frame *outFrame)
 DLLEXPORT void shutdown_capture(void)
 {
     // Release D3D11 objects, unmap shared memory, etc.
+    if (sharedTex)
+    {
+        sharedTex->lpVtbl->Release(sharedTex);
+        sharedTex = NULL;
+    }
     if (stagingTex)
     {
         stagingTex->lpVtbl->Release(stagingTex);
