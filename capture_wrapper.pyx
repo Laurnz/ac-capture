@@ -44,5 +44,6 @@ def get_frame(wait_for_new_frame: bool = False) -> Image:
     # Copy the data into a Python bytes object
     cdef int size = frame.width * frame.height * 4 # 4 bytes per pixel
     py_bytes = bytes((<char*>frame.data)[:size])
+    free(frame.data)
 
     return Image.frombuffer("RGBA", (frame.width, frame.height), py_bytes, "raw")
